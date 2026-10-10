@@ -18,7 +18,7 @@ on:
       DEVICE_TREE_URL:
         description: 'DEVICE_TREE_URL (ganti USERNAME dengan akun GitHub kamu)'
         required: true
-        default: 'https://github.com/sushtrsh/x6885_a16'
+        default: 'https://github.com/usermahiro/yo'
       DEVICE_TREE_BRANCH:
         description: 'DEVICE_TREE_BRANCH'
         required: true
