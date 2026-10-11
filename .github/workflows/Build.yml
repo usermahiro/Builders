@@ -1,4 +1,4 @@
-name: Recovery Build 14.1
+name: Build Orangefox
 
 on:
   workflow_dispatch:
@@ -38,7 +38,7 @@ on:
         required: true
         default: 'X6886'
       MAKEFILE_NAME:
-        description: 'MAKEFILE_NAME (lunch: <MAKEFILE_NAME>-ap2a-eng)'
+        description: 'MAKEFILE_NAME'
         required: true
         default: 'fox_X6886'
       BUILD_TARGET:
@@ -135,32 +135,76 @@ jobs:
         cd ${{ steps.pwd.outputs.workspace-folder }}/fox_${{ github.event.inputs.MANIFEST_BRANCH }}
         set +e
         source build/envsetup.sh
-        # vendorsetup tree ini nge-apply patch ke source OrangeFox & set FOX_* env
         source ${{ github.event.inputs.DEVICE_PATH }}/vendorsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         export FOX_USE_ZSTD_BINARY=1
-        set -e
-        lunch ${{ github.event.inputs.MAKEFILE_NAME }}-ap2a-eng && make clean && mka adbd ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
+        set -eo pipefail
+        lunch ${{ github.event.inputs.MAKEFILE_NAME }}-ap2a-eng
+        make clean
+        mka adbd ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all) 2>&1 | tee ${{ steps.pwd.outputs.workspace-folder }}/build.log
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
-      continue-on-error: true
 
-    - name: Check the output directory before uploading
+    - name: Check the output directory
       run: |
-        ls -al ${{ steps.pwd.outputs.workspace-folder }}/fox_${{ github.event.inputs.MANIFEST_BRANCH }}/out/target/product/
-        echo
-        ls -al ${{ steps.pwd.outputs.workspace-folder }}/fox_${{ github.event.inputs.MANIFEST_BRANCH }}/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/
+        OUT=${{ steps.pwd.outputs.workspace-folder }}/fox_${{ github.event.inputs.MANIFEST_BRANCH }}/out/target/product/${{ github.event.inputs.DEVICE_NAME }}
+        ls -al "$OUT"
+
+    - name: Prepare release files
+      id: rel
+      run: |
+        set -e
+        WS=${{ steps.pwd.outputs.workspace-folder }}
+        SRC=$WS/fox_${{ github.event.inputs.MANIFEST_BRANCH }}
+        OUT=$SRC/out/target/product/${{ github.event.inputs.DEVICE_NAME }}
+        DEV=${{ github.event.inputs.DEVICE_NAME }}
+        DATE=$(date -u +%Y%m%d)
+        TREE_SHA=$(git -C "$SRC/${{ github.event.inputs.DEVICE_PATH }}" rev-parse --short HEAD)
+        mkdir -p "$WS/release"
+
+        if [ ! -s "$OUT/vendor_boot.img" ]; then
+          echo "::error::vendor_boot.img was not produced; refusing to publish a release."
+          exit 1
+        fi
+        cp "$OUT/vendor_boot.img" "$WS/release/OrangeFox-${DEV}-${DATE}-vendor_boot.img"
+
+        cd "$WS/release"
+        sha256sum * > SHA256SUMS.txt
+        ls -al
+
+        echo "date=$DATE" >> "$GITHUB_OUTPUT"
+        echo "tree_sha=$TREE_SHA" >> "$GITHUB_OUTPUT"
+        echo "image=OrangeFox-${DEV}-${DATE}-vendor_boot.img" >> "$GITHUB_OUTPUT"
+
+    - name: Upload build log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log-${{ github.run_id }}
+        path: ${{ steps.pwd.outputs.workspace-folder }}/build.log
+        if-no-files-found: ignore
 
     - name: Upload to Release
       uses: softprops/action-gh-release@v2
       with:
         files: |
-          ${{ steps.pwd.outputs.workspace-folder }}/fox_${{ github.event.inputs.MANIFEST_BRANCH }}/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*.img
-          ${{ steps.pwd.outputs.workspace-folder }}/fox_${{ github.event.inputs.MANIFEST_BRANCH }}/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*.zip
-        name: ${{ github.event.inputs.DEVICE_NAME }}-${{ github.run_id }}
-        tag_name: ${{ github.run_id }}
+          ${{ steps.pwd.outputs.workspace-folder }}/release/*
+        name: OrangeFox ${{ github.event.inputs.DEVICE_NAME }} - ${{ steps.rel.outputs.date }}
+        tag_name: ${{ github.event.inputs.DEVICE_NAME }}-${{ steps.rel.outputs.date }}-${{ github.run_number }}
+        prerelease: true
         body: |
-          Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
-          Device: ${{ github.event.inputs.DEVICE_NAME }}
-          Target: ${{ github.event.inputs.BUILD_TARGET }}
+          Unofficial OrangeFox build for **${{ github.event.inputs.DEVICE_NAME }}**.
+
+          | | |
+          |---|---|
+          | Manifest | ${{ github.event.inputs.MANIFEST_BRANCH }} |
+          | Target | ${{ github.event.inputs.BUILD_TARGET }} |
+          | Device tree | ${{ github.event.inputs.DEVICE_TREE_URL }} @ `${{ steps.rel.outputs.tree_sha }}` (${{ github.event.inputs.DEVICE_TREE_BRANCH }}) |
+          | Built | ${{ steps.rel.outputs.date }} (UTC) |
+
+          Flash Step:
+          ```
+          fastboot flash vendor_boot ${{ steps.rel.outputs.image }}
+          ```
+          Verify the download with `SHA256SUMS.txt`. Back up before flashing.
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
