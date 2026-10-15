@@ -5,7 +5,7 @@ Unofficial OrangeFox device tree.
 | Device | `X6885` (Infinix) |
 |---|---|
 | Platform | MT6789 |
-| Firmware | 145SP08 |
+| Firmware | 155 |
 | Android | Android 16 |
 
 ## Layout
@@ -27,3 +27,4 @@ Unofficial OrangeFox device tree.
 
 ```bash
 fastboot flash vendor_boot OrangeFox-X6885-<date>-vendor_boot.img
+uhh h
