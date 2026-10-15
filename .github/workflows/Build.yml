@@ -15,32 +15,28 @@ on:
         options:
           - 12.1
           - 14.1
-      DEVICE_TREE_URL:
-        description: 'DEVICE_TREE_URL'
-        required: true
-        default: 'https://github.com/usermahiro/yo'
-      DEVICE_TREE_BRANCH:
-        description: 'DEVICE_TREE_BRANCH'
-        required: true
-        default: 'main'
       DEVICE_PATH:
         description: 'DEVICE_PATH'
         required: true
-        default: 'device/infinix/X6886'
+        default: 'device/infinix/X6885'
       COMMON_TREE_URL:
         description: 'COMMON_TREE_URL'
         required: false
+      COMMON_TREE_BRANCH:
+        description: 'COMMON_TREE_BRANCH'
+        required: false
+        default: 'main'
       COMMON_PATH:
         description: 'COMMON_PATH'
         required: false
       DEVICE_NAME:
         description: 'DEVICE_NAME'
         required: true
-        default: 'X6886'
+        default: 'X6885'
       MAKEFILE_NAME:
         description: 'MAKEFILE_NAME'
         required: true
-        default: 'fox_X6886'
+        default: 'fox_X6885'
       BUILD_TARGET:
         description: 'BUILD_TARGET'
         required: true
@@ -87,8 +83,7 @@ jobs:
         java-version: '11'
 
     - name: Setup SSH Keys
-      if: ${{ startsWith(github.event.inputs.DEVICE_TREE_URL, 'git@github.com') ||
-          startsWith(github.event.inputs.COMMON_TREE_URL, 'git@github.com') }}
+      if: ${{ startsWith(github.event.inputs.COMMON_TREE_URL, 'git@github.com') }}
       uses: webfactory/ssh-agent@v0.9.0
       with:
           ssh-private-key: |
@@ -102,10 +97,20 @@ jobs:
         ./orangefox_sync.sh --branch ${{ github.event.inputs.MANIFEST_BRANCH }} --path ${{ steps.pwd.outputs.workspace-folder }}/fox_${{ github.event.inputs.MANIFEST_BRANCH }}
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
-    - name: Clone device tree
+    - name: Install device tree from this repository
       run: |
-        cd ${{ steps.pwd.outputs.workspace-folder }}/fox_${{ github.event.inputs.MANIFEST_BRANCH }}
-        git clone ${{ github.event.inputs.DEVICE_TREE_URL }} -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} ./${{ github.event.inputs.DEVICE_PATH }}
+        set -e
+        SRC=${{ steps.pwd.outputs.workspace-folder }}/fox_${{ github.event.inputs.MANIFEST_BRANCH }}
+        DEST="$SRC/${{ github.event.inputs.DEVICE_PATH }}"
+        mkdir -p "$DEST"
+        git -C "${{ github.workspace }}" ls-files -z \
+          | grep -zv -e '^\.github/' -e '^tools/' \
+          | tar -C "${{ github.workspace }}" --null -T - -cf - \
+          | tar -C "$DEST" -xf -
+        test -f "$DEST/vendorsetup.sh" || { echo "::error::vendorsetup.sh missing in $DEST"; exit 1; }
+        test -d "$DEST/prebuilt/modules" || { echo "::error::prebuilt/modules missing"; exit 1; }
+        test -d "$DEST/recovery/root/lib/modules/touch" || { echo "::error::recovery/root/lib/modules/touch missing"; exit 1; }
+        ls -al "$DEST"
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
     - name: Clone common tree
@@ -114,7 +119,7 @@ jobs:
         && github.event.inputs.COMMON_PATH != null
       run: |
         cd ${{ steps.pwd.outputs.workspace-folder }}/fox_${{ github.event.inputs.MANIFEST_BRANCH }}
-        git clone ${{ github.event.inputs.COMMON_TREE_URL }} -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} ./${{ github.event.inputs.COMMON_PATH }}
+        git clone ${{ github.event.inputs.COMMON_TREE_URL }} -b ${{ github.event.inputs.COMMON_TREE_BRANCH }} ./${{ github.event.inputs.COMMON_PATH }}
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
     - name: Set Swap Space
@@ -149,6 +154,26 @@ jobs:
         OUT=${{ steps.pwd.outputs.workspace-folder }}/fox_${{ github.event.inputs.MANIFEST_BRANCH }}/out/target/product/${{ github.event.inputs.DEVICE_NAME }}
         ls -al "$OUT"
 
+    - name: Check module layout in ramdisks
+      continue-on-error: true
+      run: |
+        OUT=${{ steps.pwd.outputs.workspace-folder }}/fox_${{ github.event.inputs.MANIFEST_BRANCH }}/out/target/product/${{ github.event.inputs.DEVICE_NAME }}
+
+        v_count=$(find "$OUT/vendor_ramdisk/lib/modules" -name '*.ko' 2>/dev/null | wc -l)
+        echo "vendor_ramdisk/lib/modules: $v_count .ko"
+
+        t_count=$(find "$OUT/recovery/root/lib/modules/touch" -name '*.ko' 2>/dev/null | wc -l)
+        echo "recovery/root/lib/modules/touch: $t_count .ko"
+        if [ "$t_count" -eq 0 ]; then
+          echo "::warning::Modul touchscreen di recovery/root/lib/modules/touch tidak ditemukan!"
+        fi
+
+        root_count=$(find "$OUT/recovery/root/lib/modules" -maxdepth 1 -name '*.ko' 2>/dev/null | wc -l)
+        echo "recovery/root/lib/modules: $root_count .ko"
+        if [ "$root_count" -gt 0 ]; then
+          echo "::warning::Ditemukan $root_count .ko langsung di root recovery/root/lib/modules! Modul platform berisiko menduplikasi vendor_ramdisk."
+        fi
+
     - name: Prepare release files
       id: rel
       run: |
@@ -158,11 +183,17 @@ jobs:
         OUT=$SRC/out/target/product/${{ github.event.inputs.DEVICE_NAME }}
         DEV=${{ github.event.inputs.DEVICE_NAME }}
         DATE=$(date -u +%Y%m%d)
-        TREE_SHA=$(git -C "$SRC/${{ github.event.inputs.DEVICE_PATH }}" rev-parse --short HEAD)
+        TREE_SHA=$(git -C "${{ github.workspace }}" rev-parse --short HEAD)
         mkdir -p "$WS/release"
 
         if [ ! -s "$OUT/vendor_boot.img" ]; then
           echo "::error::vendor_boot.img was not produced; refusing to publish a release."
+          exit 1
+        fi
+        IMG_SIZE=$(stat -c \%s "$OUT/vendor_boot.img")
+        echo "vendor_boot.img: $IMG_SIZE bytes (partition: 67108864)"
+        if [ "$IMG_SIZE" -gt 67108864 ]; then
+          echo "::error::vendor_boot.img is larger than the 64 MiB partition."
           exit 1
         fi
         cp "$OUT/vendor_boot.img" "$WS/release/OrangeFox-${DEV}-${DATE}-vendor_boot.img"
@@ -188,7 +219,7 @@ jobs:
       with:
         files: |
           ${{ steps.pwd.outputs.workspace-folder }}/release/*
-        name: OrangeFox ${{ github.event.inputs.DEVICE_NAME }} - ${{ steps.rel.outputs.date }}
+        name: OrangeFox ${{ github.event.inputs.DEVICE_NAME }} -${{ steps.rel.outputs.date }}
         tag_name: ${{ github.event.inputs.DEVICE_NAME }}-${{ steps.rel.outputs.date }}-${{ github.run_number }}
         prerelease: true
         body: |
@@ -198,7 +229,7 @@ jobs:
           |---|---|
           | Manifest | ${{ github.event.inputs.MANIFEST_BRANCH }} |
           | Target | ${{ github.event.inputs.BUILD_TARGET }} |
-          | Device tree | ${{ github.event.inputs.DEVICE_TREE_URL }} @ `${{ steps.rel.outputs.tree_sha }}` (${{ github.event.inputs.DEVICE_TREE_BRANCH }}) |
+          | Source | ${{ github.repository }} @ `${{ steps.rel.outputs.tree_sha }}` (${{ github.ref_name }}) |
           | Built | ${{ steps.rel.outputs.date }} (UTC) |
 
           Flash Step:
